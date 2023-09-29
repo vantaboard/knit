@@ -3,8 +3,50 @@ import signal
 import sys
 import os
 from blessed import Terminal
+import rtmidi
+import threading
 
 term = Terminal()
+
+def print_progress():
+    global stitch, row, rows
+
+    print(term.home + term.clear)
+
+    if (term.height < 10 or term.width < 80):
+        print(term.center(term.bold(term.fuchsia("Please resize your terminal to be at least 30x10"))))
+        return
+
+    with term.location(0, 2):
+        row_str = term.deepskyblue("  Row{} {} / {}".format(" " * (len(str(len(rows))) - len(str(row))), row, len(rows) - 1))
+        stitch_str = term.deepskyblue("Stitch{} {} / {}".format(" " * (len(str(len(rows[row]))) - len(str(stitch + 1))), stitch + 1, len(rows[row])))
+
+        print(term.center(row_str + " " * (term.width - 40) +  stitch_str))
+
+    if row == len(rows) - 1:
+        print(term.center(term.deepskyblue('Cast Off')))
+
+    prespace = 0
+    for i in range(stitch):
+        prespace += len(rows[row][i])
+
+    postspace = 0
+    for i in range(stitch + 1, len(rows[row])):
+        postspace += len(rows[row][i])
+
+    previous_row = rows[row - 1] if row > 0 else []
+    next_row = rows[row + 1] if row < len(rows) - 1 else []
+
+    with term.location(0, term.height // 2 - 2):
+        print(term.center(term.gray32(" ".join(previous_row))))
+        print(term.center(" " * (stitch + prespace) + term.bold(term.fuchsia("↓")) + " " * (len(rows[row]) - stitch - 1 + postspace)))
+        prefix = " ".join(rows[row][:stitch])
+        print(term.center((prefix + " " if len(prefix) else "") + " ".join(rows[row][stitch:])))
+        print()
+        print(term.center(term.gray32(" ".join(next_row))))
+
+    with term.location(0, term.height - 1):
+        print(term.center('b ' + term.bold('back') + ', f ' + term.bold('forward') + ', ← ' + term.bold('back one stitch') + ', → ' + term.bold('forward one stitch') + ', q ' + term.bold('quit')))
 
 def parse_row(stitch_count, line):
     row = []
@@ -22,6 +64,7 @@ def parse_row(stitch_count, line):
             row = []
             repeating = True
 
+        c = re.search(r"c(\d+)?", stitch)
         k = re.search(r"k(\d+)?", stitch)
         p = re.search(r"p(\d+)?", stitch)
         k2tog = re.search(r"k2tog(\d+)?", stitch)
@@ -33,6 +76,8 @@ def parse_row(stitch_count, line):
             row += ["p"] * int(p.group(1) or 1)
         elif k:
             row += ["k"] * int(k.group(1) or 1)
+        elif c:
+            row += ["c"] * int(c.group(1) or 1)
         else:
             row.append(stitch)
 
@@ -70,7 +115,7 @@ def parse_progress(filename):
 
 
 def save_progress(filename, row, stitch):
-    print(term.home + term.clear)
+    print(term.clear)
 
     with open(filename, "w") as f:
         f.write("row: {}\nstitch: {}".format(row, stitch))
@@ -79,106 +124,79 @@ def save_progress(filename, row, stitch):
 
     sys.exit()
 
-def print_progress(rows, row, stitch, key = ''):
-    print(term.home + term.clear)
+if len(sys.argv) < 3:
+    print("Usage: python main.py <pattern_file> <progress_file>")
+    sys.exit()
 
-    if (term.height < 10 or term.width < 80):
-        print(term.center(term.bold(term.fuchsia("Please resize your terminal to be at least 30x10"))))
+pattern_file = sys.argv[1]
+progress_file = sys.argv[2]
+
+if not os.path.isfile(pattern_file):
+    print("Error: {} is not a file".format(pattern_file))
+    sys.exit()
+
+if not os.path.isfile(progress_file):
+    with open(progress_file, "w") as f:
+        f.write("row: 0\nstitch: 0")
+    sys.exit()
+
+rows = parse_pattern(pattern_file)
+row, stitch = parse_progress(progress_file)
+
+signal.signal(signal.SIGINT, lambda sig, data: save_progress(progress_file, row, stitch))
+
+forward = True
+
+def move():
+    global row, stitch
+
+    if (row == 0 and stitch == 0 and not forward):
         return
 
-    with term.location(0, 2):
-        row_str = term.deepskyblue("  Row{} {} / {}".format(" " * (len(str(len(rows))) - len(str(row + 1))), row + 1, len(rows)))
-        stitch_str = term.deepskyblue("Stitch{} {} / {}".format(" " * (len(str(len(rows[row]))) - len(str(stitch + 1))), stitch + 1, len(rows[row])))
+    stitch += 1 if forward else -1
+    if (stitch >= len(rows[row]) and forward) or (stitch < 0 and not forward):
+        stitch = 0 if forward else len(rows[row]) - 1
+        row += 1 if forward else -1
+        if row >= len(rows):
+            print("You're done!")
+            save_progress(progress_file, 0, 0)
+            sys.exit()
+        if (row < 0):
+            row = 0
 
-        print(term.center(row_str + " " * (term.width - 40) +  stitch_str))
+while True:
+    with term.cbreak(), term.hidden_cursor():
+        print_progress()
+        key = term.inkey()
 
-    if row == len(rows) - 1:
-        print(' | ' + term.deepskyblue('Cast Off'), end="")
+        if key == "b":
+            forward = False
 
-    print('\n')
+        if key == "f":
+            forward = True
 
-    prespace = 0
-    for i in range(stitch):
-        prespace += len(rows[row][i])
+        if key == "h" or repr(key) == "KEY_LEFT":
+            forward = False
+            key = " "
 
-    postspace = 0
-    for i in range(stitch + 1, len(rows[row])):
-        postspace += len(rows[row][i])
+        if key == "l" or repr(key) == "KEY_RIGHT":
+            forward = True
+            key = " "
 
-    previous_row = rows[row - 1] if row > 0 else []
-    next_row = rows[row + 1] if row < len(rows) - 1 else []
+        if key == "j" or repr(key) == "KEY_DOWN":
+            row += 1
+            if row >= len(rows):
+                row = len(rows) - 1
+            stitch = 0
 
-    with term.location(0, term.height // 2 - 2):
-        print(term.center(term.gray32(" ".join(previous_row))))
-        print(term.center(" " * (stitch + prespace) + term.bold(term.fuchsia("↓")) + " " * (len(rows[row]) - stitch - 1 + postspace)))
-        prefix = " ".join(rows[row][:stitch])
-        print(term.center((prefix + " " if len(prefix) else "") + " ".join(rows[row][stitch:])))
-        print()
-        print(term.center(term.gray32(" ".join(next_row))))
+        if key == "k" or repr(key) == "KEY_UP":
+            row -= 1
+            if row < 0:
+                row = 0
+            stitch = 0
 
-    with term.location(0, term.height - 1):
-        print(term.center('b ' + term.bold('back') + ', f ' + term.bold('forward') + ', ← ' + term.bold('back one stitch') + ', → ' + term.bold('forward one stitch') + ', q ' + term.bold('quit')))
+        if key == " ":
+            move()
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: python main.py <pattern_file> <progress_file>")
-        return
-
-    pattern_file = sys.argv[1]
-    progress_file = sys.argv[2]
-
-    if not os.path.isfile(pattern_file):
-        print("Error: {} is not a file".format(pattern_file))
-        return
-
-    if not os.path.isfile(progress_file):
-        with open(progress_file, "w") as f:
-            f.write("row: 0\nstitch: 0")
-        return
-
-    rows = parse_pattern(pattern_file)
-    row, stitch = parse_progress(progress_file)
-
-    print_progress(rows, row, stitch)
-    signal.signal(signal.SIGINT, lambda sig, data: save_progress(progress_file, row, stitch))
-
-    signal.signal(signal.SIGWINCH, lambda sig, data: print_progress(rows, row, stitch))
-
-    forward = True
-    while True:
-        with term.cbreak(), term.hidden_cursor():
-            key = term.inkey()
-
-            if key == "b":
-                forward = False
-
-            if key == "f":
-                forward = True
-
-            if key == "h" or repr(key) == "KEY_LEFT":
-                forward = False
-                key = " "
-
-            if key == "l" or repr(key) == "KEY_RIGHT":
-                forward = True
-                key = " "
-
-            if key == " ":
-                stitch += 1 if forward else -1
-                if (stitch >= len(rows[row]) and forward) or (stitch < 0 and not forward):
-                    stitch = 0 if forward else len(rows[row]) - 1
-                    row += 1 if forward else -1
-                    if row >= len(rows):
-                        print("You're done!")
-                        save_progress(progress_file, 0, 0)
-                        return
-                    if (row < 0):
-                        row = 0
-
-            elif key == "q":
-                save_progress(progress_file, row, stitch)
-
-            print_progress(rows, row, stitch, key)
-
-if __name__ == "__main__":
-    main()
+        elif key == "q":
+            save_progress(progress_file, row, stitch)
